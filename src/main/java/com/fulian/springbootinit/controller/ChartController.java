@@ -14,6 +14,7 @@ import com.fulian.springbootinit.constant.FileConstant;
 import com.fulian.springbootinit.constant.UserConstant;
 import com.fulian.springbootinit.exception.BusinessException;
 import com.fulian.springbootinit.exception.ThrowUtils;
+import com.fulian.springbootinit.manager.AiManager;
 import com.fulian.springbootinit.model.dto.chart.*;
 import com.fulian.springbootinit.model.dto.file.UploadFileRequest;
 import com.fulian.springbootinit.model.dto.post.PostQueryRequest;
@@ -21,6 +22,7 @@ import com.fulian.springbootinit.model.entity.Chart;
 import com.fulian.springbootinit.model.entity.Post;
 import com.fulian.springbootinit.model.entity.User;
 import com.fulian.springbootinit.model.enums.FileUploadBizEnum;
+import com.fulian.springbootinit.model.vo.BiResponse;
 import com.fulian.springbootinit.service.ChartService;
 import com.fulian.springbootinit.service.UserService;
 import com.fulian.springbootinit.utils.ExcelUtils;
@@ -54,6 +56,9 @@ public class ChartController {
 
     @Resource
     private UserService userService;
+
+    @Resource
+    private AiManager aiManager;
 
     // region 增删改查
 
@@ -227,7 +232,7 @@ public class ChartController {
      * @return
      */
     @PostMapping("/gen")
-    public BaseResponse<String> genChartByAi(@RequestPart("file") MultipartFile multipartFile,
+    public BaseResponse<BiResponse> genChartByAi(@RequestPart("file") MultipartFile multipartFile,
                                              GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) {
         String name = genChartByAiRequest.getName();
         String goal = genChartByAiRequest.getGoal();
@@ -236,22 +241,71 @@ public class ChartController {
         ThrowUtils.throwIf(StringUtils.isBlank(goal),ErrorCode.PARAMS_ERROR,"目标为空");
         ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100 ,ErrorCode.PARAMS_ERROR,"名称过长");
 
-        // 用户输入
+        User loginUser = userService.getLoginUser(request);
+
+        // 指定一个模型
+//        long biModelId = 1659171950288818178L;
+        long biModelId = 1659920671007834113L;
+
+        /**
+         * 输出格式
+         * 你是一个数据分析师和前端开发专家，接下来我会按照以下固定格式给你提供内容：
+         * 分析需求：
+         * {数据分析的需求或者目标}
+         * 原始数据：
+         * {csv格式的原始数据，用,作为分隔符}
+         * 请根据这两部分内容，按照以下指定格式生成内容（此外不要输出任何多余的开头、结尾、注释）
+         * 【【【【【
+         * {前端 Echarts V5 的 option 配置对象js代码，合理地将数据进行可视化，不要生成任何多余的内容，比如注释}
+         * 【【【【【
+         * {明确的数据分析结论、越详细越好，不要生成多余的注释}
+         *
+         */
+        // 构造用户输入
         StringBuilder userInput = new StringBuilder();
-        userInput.append("你是一个数据分析师，接下来我会给你我的分析目标和原始数据，请告诉我分析结论。").append("\n");
-        userInput.append("分析目标："+goal).append("\n");
+
+        userInput.append("分析需求：").append("\n");
+        String userGoal = goal;
+        // 如果图表类型不为空
+        if (StringUtils.isNotBlank(chartType)){
+            userGoal += "，请使用" + chartType;
+        }
+        userInput.append(userGoal).append("\n");
 
         // 压缩后的数据
-        String result = ExcelUtils.excelToCsv(multipartFile);
-        userInput.append("数据：").append(result).append("\n");
-        return ResultUtils.success(userInput.toString());
-        // 读取到 excel 文件
-//        User loginUser = userService.getLoginUser(request);
-//        // 文件目录：根据业务、用户来划分
-//        String uuid = RandomStringUtils.randomAlphanumeric(8);
-//        String filename = uuid + "-" + multipartFile.getOriginalFilename();
-//        File file = null;
-//       return null;
+        userInput.append("原始数据：").append("\n");
+        String csvData = ExcelUtils.excelToCsv(multipartFile);
+        userInput.append(csvData).append("\n");
+
+        // 拿到返回结果
+        String result = aiManager.doChat(biModelId, userInput.toString());
+        // 对结果进行拆分
+        String[] split = result.split("【【【【【");
+        // 校验
+        if (split.length < 3){
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"AI 生成错误");
+        }
+        String genChart = split[1].trim();
+        String genResult = split[2].trim();
+
+        // 插入到数据库
+        Chart chart = new Chart();
+        chart.setName(name);
+        chart.setGoal(goal);
+        chart.setChartData(csvData);
+        chart.setChartType(chartType);
+        chart.setGenChart(genChart);
+        chart.setGenResult(genResult);
+        chart.setUserId(loginUser.getId());
+        boolean save = chartService.save(chart);
+        ThrowUtils.throwIf(!save, ErrorCode.SYSTEM_ERROR,"图表保存失败");
+        BiResponse biResponse = new BiResponse();
+        biResponse.setGenChart(genChart);
+        biResponse.setGenResult(genResult);
+        biResponse.setChartId(chart.getId());
+
+        return ResultUtils.success(biResponse);
+
     }
 
     /**
